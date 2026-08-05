@@ -1,226 +1,315 @@
-# 网易云音乐 API Enhanced
+# 网易云音乐内置 SDK（NCM）使用指南
 
----
+内置在 App 里的网易云音乐本地 SDK（包 `net.moriafly.ncm`），本质是 **NeteaseCloudMusicApi（NodeJS 原版）的 Kotlin 移植版**——不需要部署任何服务器、不依赖外部代理，直接加密请求网易云官方接口。
 
-## 项目简介
+## 1. 特性
 
-本项目为网易云音乐第三方 Node.js API，基于停更的原版 API 持续维护，支持丰富的音乐相关接口，适合自建服务、二次开发和多平台部署(如果原版诈尸, 我会及时同步 or 归档)。
+- **零外部依赖**：只用 JDK 自带 `javax.crypto`（AES/RSA）和 `java.net.HttpURLConnection`，加 `timber` 打日志。
+- **三种加密路由**：`weapi` / `eapi` / `linuxapi`，与原版 `util/crypto.js` 一致。
+- **300+ 接口**：搜索、播放 URL、歌词、私人FM、评论、红心、歌单、用户、榜单、MV、云盘等全部覆盖。
+- **自动处理**：cookie 会话、gzip/deflate 解压、301/302 跟随、Set-Cookie 合并、登录态同步。
+- **所有方法返回 `Result<Map<String, Any?>>`**，异常统一包装，不会崩溃。
 
-> [!IMPORTANT]
->
-> ## 注意
->
-> - 本项目是一个高度去中心化的第三方 API，其维护都由社区志愿者使用`Pull Request`完成。   
-> - 使用本项目时请务必遵守相关法律法规，遵守`MIT`协议, 尊重网易云音乐的服务条款。   
-> - 原作者项目 [Binaryify/NeteaseCloudMusicApi](https://github.com/binaryify/NeteaseCloudMusicApi) 并非完全停止维护, 你可以在 [NeteaseCloudMusicApi 的 NPMJS 页面](https://www.npmjs.com/package/NeteaseCloudMusicApi) 查看最新版本信息。   
-> - 感谢尊重和理解!
+## 2. 快速接入（3 步）
 
-## 快速开始
+### 2.1 Application 初始化
 
-### 环境要求
-
-- Node.js 18 及以上
-- 推荐使用 pnpm 进行依赖管理
-
-### 安装
-
-```bash
-git clone https://github.com/neteasecloudmusicapienhanced/api-enhanced.git
-cd api
-pnpm i
+```kotlin
+class PixelPlayApplication : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        NcmApi.install(this)
+        // 可选参数：
+        // NcmApi.install(this, os = "pc", realIp = null, proxy = null)
+    }
+}
 ```
 
-### 启动服务
+| 参数 | 说明 |
+|---|---|
+| `os` | 加密平台：`pc`（默认）/ `android` / `ios`，决定 UA 与 appver |
+| `realIp` | 注入 `X-Real-IP`（海外 IP 被限制时填一个国内 IP） |
+| `proxy` | HTTP 代理，如 `http://127.0.0.1:7890` |
 
-```bash
-# 默认端口 3000
-node app.js
+### 2.2 调用一个接口
 
-# 指定端口（如 4000）
-PORT=4000 node app.js  # Mac/Linux
-set PORT=4000 && node app.js  # Windows
+```kotlin
+lifecycleScope.launch {
+    NcmApi.search("周杰伦", limit = 10)
+        .onSuccess { body ->
+            val result = body["result"] as? Map<*, *> ?: return@onSuccess
+            val songs = result["songs"] as? List<*> ?: return@onSuccess
+            songs.forEach { song ->
+                val m = song as Map<*, *>
+                Timber.d("歌曲: ${m["name"]} id=${m["id"]}")
+            }
+        }
+        .onFailure { Timber.e(it, "搜索失败") }
+}
 ```
 
-### 重要提示
+> 所有方法都在内部切到 `Dispatchers.IO`，可以放心在协程里直接调。
 
-- 调用前请务必阅读文档的 [调用前须知](https://neteasecloudmusicapienhanced.js.org/#/?id=%e8%b0%83%e7%94%a8%e5%89%8d%e9%a1%bb%e7%9f%a5) 部分。
-- 推荐将敏感信息（如 cookie）通过部署平台的环境变量进行配置。
+### 2.3 登录（私人FM / 红心 / 评论 需要登录）
 
-## 在线体验与文档
+```kotlin
+// 方式一：手机号 + 验证码
+NcmApi.loginCellphone(phone = "138xxxx", captcha = "1234")
 
-- [在线文档](https://neteasecloudmusicapienhanced.js.org/)
-- [NPM 包地址](https://www.npmjs.com/package/@neteasecloudmusicapienhanced/api)
-- [Dockerhub 主页](https://hub.docker.com/r/moefurina/ncm-api)
+// 方式二：手机号 + 密码
+NcmApi.loginCellphone(phone = "138xxxx", password = md5(password))
 
-## 常见部署方式
-
-- 推荐参考[在线文档](https://neteasecloudmusicapienhanced.js.org/)
-
-## Docker 部署说明
-
-本项目支持通过 Docker 一键部署，无需手动安装 Node.js 或依赖。
-
-> 注意: 在 docker 中运行的时候, 由于使用了 request 来发请求, 所以会检查几个 proxy 相关的环境变量(如下所列), 这些环境变量 会影响到 request 的代理, 详情请参考[request 的文档](https://github.com/request/request#proxies), 如果这些环境变量 指向的代理不可用, 那么就会造成错误, 所以在使用 docker 的时候一定要注意这些环境变量. 不过, 要是你在 query 中加上了 proxy 参数, 那么环境变量会被覆盖, 就会用你通过 proxy 参数提供的代理了.
-
-request 相关的环境变量
-
-1. http_proxy
-2. https_proxy
-3. HTTP_PROXY
-4. HTTPS_PROXY
-5. no_proxy
-6. NO_PROXY
-
-```shell
-docker pull moefurina/ncm-api:latest
-
-docker run -d -p 3000:3000 --name ncm-api moefurina/ncm-api:latest
-
-
-// 或者
-docker run -d -p 3000:3000 moefurina/ncm-api:latest
-
-// 去掉或者设置相关的环境变量
-
-docker run -d -p 3000:3000 --name ncm-api -e http_proxy= -e https_proxy= -e no_proxy= -e HTTP_PROXY= -e HTTPS_PROXY= -e NO_PROXY= moefurina/ncm-api:latest
-
-// 或者
-docker run -d -p 3000:3000 -e http_proxy= -e https_proxy= -e no_proxy= -e HTTP_PROXY= -e HTTPS_PROXY= -e NO_PROXY= moefurina/ncm-api:latest
+// 方式三（推荐）：二维码登录
+val (key, pngBase64) = NcmApi.qrLoginPrepare().getOrThrow()
+// 把 pngBase64 转 Bitmap 显示给用户
+NcmApi.qrLoginAwait(key) { code, _ -> /* 801等待 802已扫 803成功 800过期 */ }
 ```
 
-> 以下是自行 build docker 镜像方式
+登录态由 `NcmSession` 自动持久化（SharedPreferences），重启 App 无需重新登录。判断登录态：
 
-```shell
-$ git clone https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced && cd api-enhanced
-
-$ sudo docker build . -t ncm-api
-
-$ sudo docker run -d -p 3000:3000 ncm-api
+```kotlin
+NcmApi.isLogin
+NcmApi.userId
 ```
 
-## 3. 环境变量
+## 3. 常用接口速查
 
-| 变量名                        | 默认值                                  | 说明                                                 |
-|----------------------------|--------------------------------------|----------------------------------------------------|
-| **CORS_ALLOW_ORIGIN**      | `*`                                  | 允许跨域请求的域名。若需要限制，请指定具体域名（例如 `https://example.com`）。 |
-| **ENABLE_PROXY**           | `false`                              | 是否启用反向代理功能。                                        |
-| **PROXY_URL**              | `https://your-proxy-url.com/?proxy=` | 代理服务地址。仅当 `ENABLE_PROXY=true` 时生效。                 |
-| **ENABLE_GENERAL_UNBLOCK** | `true`                               | 是否启用全局解灰（推荐开启）。开启后所有歌曲都尝试自动解锁。                     |
-| **ENABLE_FLAC**            | `true`                               | 是否启用无损音质（FLAC）。                                    |
-| **SELECT_MAX_BR**          | `false`                              | 启用无损音质时，是否选择最高码率音质。                                |
-| **FOLLOW_SOURCE_ORDER**    | `true`                               | 是否严格按照音源列表顺序进行匹配。                                  |
+### 3.1 搜索
 
----
-
-### 4. 更新镜像
-
-更新到最新版本：
-
-```bash
-docker pull moefurina/ncm-api:latest
-docker stop ncm-api && docker rm ncm-api
-docker run -d -p 3000:3000 moefurina/ncm-api:latest
+```kotlin
+NcmApi.search(keyword, type, limit, offset)      // /api/search/get
+NcmApi.full.cloudSearch(keyword, type, limit, offset) // /api/cloudsearch/get/web（更全）
+NcmApi.full.searchHot()                          // 热搜
+NcmApi.full.searchSuggest(keyword)               // 搜索建议
+NcmApi.full.searchMultimatch(keyword)            // 多重匹配
 ```
 
-## Vercel 一键部署
+`type`：1=单曲、10=专辑、100=歌手、1000=歌单、1004=MV、1009=电台、1014=视频、1018=综合。
 
-1. fork 本项目
-2. 在 Vercel 官网新建项目，导入 fork 的仓库
-3. 直接 Deploy
+### 3.2 播放
 
-## 腾讯云 Serverless 部署
+```kotlin
+// 新版音质接口（推荐）
+NcmApi.songUrlV1(ids = listOf("4876940"), level = "exhigh", encodeType = "flac")
 
-1. fork 本项目
-2. 在腾讯云 serverless 控制台新建 Web 应用，选择 Express 框架
-3. 代码仓库选择 fork 的项目，启动文件填写：
-   ```bash
-   #!/bin/bash
-   export PORT=9000
-   /var/lang/node16/bin/node app.js
-   ```
-4. 完成部署后，访问 API 网关的 URL 即可
+// level 取值：standard / higher / exhigh / lossless / hires / jyeffect / jymaster / sky
+// encodeType：flac / mp3 / aac
 
-## Node.js 方式调用
+// 旧版码率接口
+NcmApi.songUrl(id = "4876940", br = 320_000)
 
-支持直接在 Node.js 项目中引入和调用，返回 Promise：
+// 歌曲详情 / 是否可播
+NcmApi.songDetail(listOf("4876940"))
+NcmApi.checkMusicPlayable(id = "4876940", br = 320_000)
+```
+
+返回的 `data[].url` 才是真正的音频直链。
+
+### 3.3 歌词
+
+```kotlin
+val body = NcmApi.full.songLyric(id = "4876940").getOrThrow()
+val lrc = body["lrc"] as? Map<*, *>          // 原文歌词
+val lyricText = lrc?.get("lyric") as? String
+// 可选：nolyric / tlyric(翻译) / romalrc(罗马音)
+```
+
+### 3.4 私人 FM
+
+```kotlin
+val body = NcmApi.full.personalFm().getOrThrow()  // 需要登录
+val songs = body["data"] as? List<*>               // 歌曲数组
+```
+
+### 3.5 红心 / 喜欢
+
+```kotlin
+NcmApi.full.like(id = "4876940", like = true)      // 红心 / 取消
+val body = NcmApi.full.likelist(uid = "123").getOrThrow()
+val ids = body["ids"] as? List<*>                  // 已红心的歌曲 id 列表
+```
+
+### 3.6 评论
+
+```kotlin
+val body = NcmApi.full.commentMusic(id = "4876940", limit = 20).getOrThrow()
+val hot = body["hotComments"] as? List<*>           // 热门评论
+val normal = body["comments"] as? List<*>           // 最新评论
+val total = body["total"]
+
+// 发评论 / 点赞评论
+NcmApi.full.commentSend(NcmModulesFull.CmtType.SONG, "4876940", "好听")
+NcmApi.full.commentLike("4876940", "评论id", NcmModulesFull.CmtType.SONG)
+```
+
+### 3.7 歌单 / 榜单
+
+```kotlin
+NcmApi.full.playlistDetail(id = "歌单id")
+NcmApi.full.playlistTrackAll(id = "歌单id", limit = 1000)  // 歌单所有歌曲
+NcmApi.full.toplist()                                      // 所有榜单
+NcmApi.full.toplistDetail(id = "榜单id")                   // 榜单详情
+NcmApi.full.playlistTrackAdd(pid, ids)                     // 歌单加歌
+```
+
+### 3.8 用户 / 歌手
+
+```kotlin
+NcmApi.full.userDetail(uid)
+NcmApi.full.userPlaylist(uid)          // 用户的歌单
+NcmApi.full.userRecord(uid, type = 1)  // 听歌排行
+NcmApi.full.artistSongs(id)            // 歌手热门50首
+NcmApi.full.artistAlbum(id)
+```
+
+## 4. 全量模块 `NcmApi.full`
+
+`NcmApi.full` 收录了原版 `/module/*.js` 的 300+ 个接口，按类别分组：
+
+- **搜索扩展**：`searchHot` / `searchHotDetail` / `searchSuggest` / `cloudSearch`
+- **歌词下载**：`songLyric` / `lyricNew` / `songDownloadUrlV1`
+- **相似推荐**：`simiSong` / `simiPlaylist` / `simiArtist` / `simiUser`
+- **榜单**：`toplist` / `toplistDetail` / `topSong` / `topPlaylist`
+- **歌手**：`artistSongs` / `artistAlbum` / `artistDetail` / `artistTopSong`
+- **专辑**：`album` / `albumDetail` / `albumSub` / `albumNew`
+- **歌单**：`playlistCreate` / `playlistTrackAdd` / `playlistSubscribe` ...
+- **喜欢/评论**：`like` / `likelist` / `commentMusic` / `commentSend` / `commentLike`
+- **用户**：`userDetail` / `userPlaylist` / `userFollows` / `userEvent`
+- **DJ电台**：`djDetail` / `djProgram` / `djRecommend` ...
+- **MV/视频**：`mvUrl` / `mvDetail` / `videoUrl` / `videoDetail`
+- **私人FM/日推**：`personalFm` / `fmTrash` / `recommendSongs` / `historyRecommendSongs`
+- **签到/VIP/云贝**：`dailySignin` / `vipInfo` / `yunbeiSign` ...
+- **云盘**：`userCloud` / `cloudMatch` / `cloudUploadToken`
+- **消息/私信**：`msgPrivate` / `sendText` / `msgNotices`
+
+> IDE 输入 `NcmApi.full.` 会自动补全所有方法签名。
+
+### 兜底入口（新增接口不用写代码）
+
+如果某个接口没在 `FullAccess` 里暴露，直接用 raw 方法：
+
+```kotlin
+NcmApi.full.rawWeapi("/api/xxx", mapOf("key" to value))
+NcmApi.full.rawEapi("/api/xxx", mapOf("key" to value))
+NcmApi.full.rawLinuxapi("/api/xxx", mapOf("key" to value))
+```
+
+## 5. 返回结构解析
+
+所有方法返回 `Result<Map<String, Any?>>`（对应原版响应的 JSON 对象，`code` 是数字）。
+
+### 5.1 手写解析（Map 版）
+
+```kotlin
+val body = NcmApi.songUrlV1(listOf("4876940")).getOrThrow()
+val code = body["code"] as? Int ?: -1
+val data = body["data"] as? List<*>
+```
+
+### 5.2 便捷扩展（推荐）
+
+`NcmJson.kt` 自带扩展函数，自动处理 null / 类型转换：
+
+```kotlin
+val map: Map<String, Any?> = ...
+val name = map.ncmString("name")          // 无则 ""
+val count = map.ncmInt("count")           // 数字/字符串都能转
+val total = map.ncmLong("total")
+val ok = map.ncmBool("success")
+val user = map.ncmObj("user")             // 嵌套 Map
+val songs = map.ncmList("songs")          // 嵌套 List
+```
+
+## 6. 会话管理
+
+```kotlin
+// 运行期切换（不同接口对 pc 更友好）
+NcmApi.setOs("pc")
+NcmApi.setRealIp("116.25.146.177")
+NcmApi.setProxy("http://127.0.0.1:7890")
+
+// 退出登录
+NcmApi.logout()
+
+// 调试：打印当前会话
+NcmApi.dumpSession()
+```
+
+## 7. 常见问题 / 坑
+
+### 7.1 响应是乱码密文？
+
+**根因**：请求头带了 `Accept-Encoding: gzip, deflate, br`，而 Java `HttpURLConnection` 不会解 br。
+**已修复**：内置 SDK 只请求 `gzip`，并支持 gzip + deflate 解压。不要再把 `br` 加进 Accept-Encoding。
+
+### 7.2 需要登录的接口返回 301？
+
+私人FM、红心、评论等**必须登录**。先确认 `NcmApi.isLogin == true`；未登录时先走 `loginCellphone` / `qrLoginAwait`。
+
+### 7.3 怎么查看请求详情？
+
+logcat 过滤 `NcmRequest`：
+
+```
+NCM /api/search/get -> code=200 bodyLen=2276
+NCM /api/search/get -> body={"result":...}
+```
+
+第一行看状态码，第二行看实际返回内容，排查接口对没对。
+
+### 7.4 歌曲 ID 要用字符串
+
+搜索/详情接口的 id 字段 JSON 里是数字，解析时统一用 `ncmString` / `toString()` 转字符串，避免类型不匹配。
+
+### 7.5 海外 IP 被风控
+
+`NcmApi.install(this, realIp = "116.25.146.177")` 注入国内 IP，或运行时 `setRealIp`。
+
+## 8. 如何对照原版新增接口
+
+原版 `E:\NeteaseCloudMusicApi-main\module\xxx.js` 每个文件对应一个接口，移植三步：
+
+1. 打开 `NcmModulesFull.kt`，照抄原版路径与参数：
 
 ```js
-const {
-  login_cellphone,
-  user_cloud,
-} = require('@neteasecloudmusicapienhanced/api')
-async function main() {
-  const result = await login_cellphone({ phone: '手机号', password: '密码' })
-  console.log(result)
-  const result2 = await user_cloud({ cookie: result.body.cookie })
-  console.log(result2.body)
-}
-main()
+// 原版 xxx.js
+const data = { id: query.id, tv: -1 }
+return request(`/api/song/xxx`, data, createOption(query))
 ```
 
-## TypeScript 支持
-
-```ts
-import { banner } from '@neteasecloudmusicapienhanced/api'
-banner({ type: 0 }).then((res) => console.log(res))
+```kotlin
+// NcmModulesFull.kt
+suspend fun xxx(id: String) = rawWeapi("/api/song/xxx", mapOf("id" to id, "tv" to -1))
 ```
 
-## 单元测试
+2. 在 `NcmApi.FullAccess` 里加一行委托：
 
-```bash
-pnpm test
+```kotlin
+suspend fun xxx(id: String) = NcmApi.runSafely("xxx") { NcmModulesFull.xxx(id) }
 ```
 
-## 主要功能特性
+3. 编译即可用（返回统一 `Result<Map<String, Any?>>`）。
 
-- 登录/注册/验证码
-- 用户信息、歌单、动态、播放记录
-- 歌曲、专辑、歌手、MV、歌词、评论、排行榜
-- 搜索、推荐、私人 FM、签到、云盘
-- 歌曲解锁（解灰）
+加密路由对照：`crypto: 'weapi'` → `rawWeapi`；`'eapi'` → `rawEapi`；`'linuxapi'` → `rawLinuxapi`。
 
-## 贡献与社区
+## 9. 架构总览
 
-- 欢迎提交 PR、Issue 参与维护
+```
+调用方 ──► NcmApi / NcmApi.full        （门面：参数 Kotlin 化 + Result 包装）
+              │
+              ▼
+       NcmModules / NcmModulesFull     （业务模块：路径 + 参数，对齐 module/*.js）
+              │
+              ▼
+          NcmRequest                   （请求引擎：weapi/eapi/linuxapi 加密路由、cookie、gzip、3xx 跟随）
+              │
+              ▼
+          NcmCrypto                    （AES-CBC / RSA / eapi 响应解密）
+              │
+              ▼
+       music.163.com                  （官方接口）
+```
 
-## 最近更新日志
-### 4.30.0 | 2026.02.06
-- feat: 新增音乐人黑胶会员任务接口 `/musician/vip/tasks` (#95)
-- feat: 自动构建: 添加Windows、Linux、macOS预编译二进制文件 (#88)
-- fix: 修复模块未定义问题
-- chore: 更新依赖项 (music-metadata: ^11.11.1 -> ^11.11.2, ansi-escapes: ^7.2.0 -> ^7.3.0, commander: ^14.0.2 -> ^14.0.3)
-- chore: 更新GitHub Actions (checkout: v4 -> v6, setup-node: v4 -> v6, upload-artifact: v4 -> v6, download-artifact: v4 -> v7, github-script: v7 -> v8)
-- refactor: 注释掉IP地址日志输出以提升隐私保护
-
-### 致谢
-
-原作者 [Binaryify/NeteaseCloudMusicApi](https://github.com/binaryify/NeteaseCloudMusicApi) 项目为本项目基础 (该项目在`npmjs`网站上仍持续维护, 但 github 仓库已不再更新)
-
-感谢大佬们为逆向eapi, weapi等加密算法所做的贡献
-
-项目参考:
-
-[trazyn/ieaseMusic](https://github.com/trazyn/ieaseMusic)
-
-[listen1/listen1_chrome_extension](https://github.com/listen1/listen1_chrome_extension)
-
-[chaunsin/netease-cloud-music](https://github.com/chaunsin/netease-cloud-music)
-
-### SDK 生态
-
-| 语言     | 作者                                          | 地址                                                                                       | 类型  |
-|--------|---------------------------------------------|------------------------------------------------------------------------------------------|-----|
-| Java   | [JackuXL](https://github.com/JackuXL)       | [NeteaseCloudMusicApi-SDK](https://github.com/JackuXL/NeteaseCloudMusicApi-SDK)          | 第三方 |
-| Java   | [1015770492](https://github.com/1015770492) | https://github.com/1015770492/yumbo-music-utils                                          | 第三方 |
-| Python | [盧瞳](https://github.com/2061360308)         | [NeteaseCloudMusic_PythonSDK](https://github.com/2061360308/NeteaseCloudMusic_PythonSDK) | 第三方 |
-
-
-### 依赖此项目的优秀开源项目
-
-- [imsyy/splayer](https://github.com/imsyy/splayer)
-
-- [qier2222/YesPlayMusic](https://github.com/qier222/YesPlayMusic)
-
-## License
-
-[MIT License](https://github.com/MoeFurina/NeteaseCloudMusicApiEnhanced/blob/main/LICENSE)
+- `NcmSession`：会话单例，持久化 cookie / os / realIp / proxy / 登录态
+- `NcmJson`：零依赖 JSON 解析 + 便捷扩展
+- `PixelPlayApplication`：启动时 `NcmApi.install(this)`；登录态由 `NeteaseApiService.setPersistedCookies` 同步进 `NcmSession`
