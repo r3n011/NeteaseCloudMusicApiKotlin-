@@ -77,7 +77,7 @@ MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDgtQn2JZ34ZC28NWYpAUd98iZ37BUrX/aKzmFbt7cl
      *   encSecKey = RSA_NO_PADDING(randomKey 倒序字符串, publicKey).toUpperCaseHex
      */
     fun weapi(obj: Map<String, Any?>): WeapiResult {
-        val text = Json.toJsonString(obj)
+        val text = NcmJson.toJsonString(obj)
         val secretKey = randomBase62(16)
         val encFirst = aesCbcEncryptToBase64(text, PRESET_KEY, IV)
         val encSecond = aesCbcEncryptToBase64(encFirst, secretKey, IV)
@@ -90,7 +90,7 @@ MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDgtQn2JZ34ZC28NWYpAUd98iZ37BUrX/aKzmFbt7cl
      *   eparams = AES-ECB(JSON, linuxapiKey).toUpperCaseHex
      */
     fun linuxapi(obj: Map<String, Any?>): LinuxapiResult {
-        val text = Json.toJsonString(obj)
+        val text = NcmJson.toJsonString(obj)
         val hex = aesEcbEncryptToHex(text, LINUXAPI_KEY)
         return LinuxapiResult(eparams = hex)
     }
@@ -104,7 +104,7 @@ MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDgtQn2JZ34ZC28NWYpAUd98iZ37BUrX/aKzmFbt7cl
     fun eapi(url: String, obj: Any?): EapiResult {
         val json = when (obj) {
             null -> ""
-            is Map<*, *> -> Json.toJsonString(obj as Map<String, Any?>)
+            is Map<*, *> -> NcmJson.toJsonString(obj as Map<String, Any?>)
             is String -> obj
             else -> obj.toString()
         }
@@ -117,7 +117,7 @@ MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDgtQn2JZ34ZC28NWYpAUd98iZ37BUrX/aKzmFbt7cl
     /** eapi 响应解密：AES-ECB hex → UTF-8 JSON */
     fun eapiResDecrypt(encryptedHex: String): Any? {
         val json = aesEcbDecryptFromHex(encryptedHex, EAPI_KEY)
-        return runCatching { Json.parseAny(json) }.getOrNull()
+        return runCatching { NcmJson.parseAny(json) }.getOrNull()
     }
 
     /** eapi 请求体解密（调试用） */
@@ -125,7 +125,7 @@ MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDgtQn2JZ34ZC28NWYpAUd98iZ37BUrX/aKzmFbt7cl
         val raw = aesEcbDecryptFromHex(encryptedHex, EAPI_KEY)
         val match = Regex("""(.*?)-36cd479b6b5-(.*?)-36cd479b6b5-(.*)""").find(raw) ?: return null
         val (_, url, data) = match.groupValues
-        val parsed = runCatching { Json.parseAny(data) }.getOrNull() ?: data
+        val parsed = runCatching { NcmJson.parseAny(data) }.getOrNull() ?: data
         return url to parsed
     }
 
@@ -182,6 +182,7 @@ MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDgtQn2JZ34ZC28NWYpAUd98iZ37BUrX/aKzmFbt7cl
      * RSA ECB NO_PADDING 加密（对应 forge.pki.publicKey.encrypt(str, 'NONE')）：
      * - 输入长度必须 <= modulusLen - 0 （没有填充，需要前置 00 直到等于 modulusLen）
      * - 网易云实际：将 secretKey(16 字节) 左侧补 00 到 128 字节 = RSA 1024 modulusLen
+     * - 输出小写 hex（对齐原版 crypto.js 的 forge.util.bytesToHex）
      */
     private fun rsaEncryptNoPadding(plain: String): String {
         val modulusBytes = (rsaPublicKey.modulus.bitLength() + 7) / 8   // 1024/8 = 128
@@ -198,7 +199,7 @@ MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDgtQn2JZ34ZC28NWYpAUd98iZ37BUrX/aKzmFbt7cl
         )
         val cipher = Cipher.getInstance("RSA/ECB/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, rsaPublicKey)
-        return cipher.doFinal(padded).toHexUpper()
+        return cipher.doFinal(padded).toHexLower()
     }
 
     private fun md5(text: String): String {

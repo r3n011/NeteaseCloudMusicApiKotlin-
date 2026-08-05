@@ -12,7 +12,7 @@ import java.util.UUID
 
 /**
  * 网易云核心业务模块（Kotlin 移植）
- * 参考：NeteaseCloudMusicApi/module/*.js
+ * 参考：NeteaseCloudMusicApi/module 下的 *.js
  *
  * 模块对照表：
  *   JS 文件名                 | 本文件对应方法（suspend fun）
@@ -49,7 +49,7 @@ internal object NcmModules {
             NcmRequest.weapi(
                 path = "/api/search/defaultkeyword",
                 params = params,
-            ).map { it }.getOrThrow()
+            ).getOrThrow().body
         }
     }
 
@@ -74,17 +74,17 @@ internal object NcmModules {
         offset: Int = 0,
     ): Result<Map<String, Any?>> = withContext(Dispatchers.IO) {
         runCatching {
+            // 对齐原版 module/search.js：POST /api/search/get，type/limit/offset 为数字
             val params = linkedMapOf(
-            "s" to keyword,
-            "type" to type.toString(),
-            "limit" to limit.toString(),
-            "offset" to offset.toString(),
-            "total" to "true",
-        )
-        NcmRequest.weapi(
-            path = "/api/search/get/web",
-            params = params,
-        ).map { it }.getOrThrow()
+                "s" to keyword,
+                "type" to type,
+                "limit" to limit,
+                "offset" to offset,
+            )
+            NcmRequest.weapi(
+                path = "/api/search/get",
+                params = params,
+            ).getOrThrow().body
         }
     }
 
@@ -104,17 +104,17 @@ internal object NcmModules {
     ): Result<Map<String, Any?>> = withContext(Dispatchers.IO) {
         runCatching {
             val idsParam = ids.joinToString(separator = ",", prefix = "[", postfix = "]") { "\"$it\"" }
-            val immerseType = if (encodeType == "flac") 1 else 0
+            // 对齐原版 module/song_url_v1.js：默认只传 ids/level/encodeType，level=sky 才加 immerseType
             val params = linkedMapOf(
                 "ids" to idsParam,
                 "level" to level,
                 "encodeType" to encodeType,
-                "immerseType" to immerseType.toString(),
             )
+            if (level == "sky") params["immerseType"] = "c51"
             NcmRequest.weapi(
                 path = "/api/song/enhance/player/url/v1",
                 params = params,
-            ).map { it }.getOrThrow()
+            ).getOrThrow().body
         }
     }
 
@@ -133,7 +133,7 @@ internal object NcmModules {
                     "ids" to "[$id]",
                     "br" to br.toString(),
                 ),
-            ).map { it }.getOrThrow()
+            ).getOrThrow().body
         }
     }
 
@@ -148,7 +148,7 @@ internal object NcmModules {
                 params = linkedMapOf(
                     "c" to c,
                 ),
-            ).map { it }.getOrThrow()
+            ).getOrThrow().body
         }
     }
 
@@ -172,7 +172,7 @@ internal object NcmModules {
             NcmRequest.weapi(
                 path = "/api/sms/captcha/sent",
                 params = params,
-            ).map { it }.getOrThrow()
+            ).getOrThrow().body
         }
     }
 
@@ -190,7 +190,7 @@ internal object NcmModules {
                     "cellphone" to phone,
                     "captcha" to captcha,
                 ),
-            ).map { it }.getOrThrow()
+            ).getOrThrow().body
         }
     }
 
@@ -208,7 +208,7 @@ internal object NcmModules {
         runCatching {
             val params = linkedMapOf<String, Any?>(
                 "cellphone" to phone,
-                "countrycode" to (countrycode ?: ctcode,
+                "countrycode" to (countrycode ?: ctcode),
                 "rememberLogin" to "true",
                 "ctcode" to ctcode,
             )
@@ -245,7 +245,7 @@ internal object NcmModules {
             NcmRequest.weapi(
                 path = "/api/w/login/status",
                 params = emptyMap(),
-            ).map { it }.getOrThrow()
+            ).getOrThrow().body
         }
     }
 
@@ -256,7 +256,7 @@ internal object NcmModules {
             NcmRequest.weapi(
                 path = "/api/logout",
                 params = emptyMap(),
-            ).map { it }.getOrThrow()
+            ).getOrThrow().body
         }
     }
 
@@ -269,8 +269,8 @@ internal object NcmModules {
     /** 1) 生成二维码 key（login_qr_key.js） */
     suspend fun qrLoginKey(): Result<QrKeyResult> = withContext(Dispatchers.IO) {
         runCatching {
-            val unikey = UUID.randomUUID().toString().replace("-", "") + UUID.randomUUID()
-                .toString().replace("-", "").substring(0, 16)
+            val unikey = UUID.randomUUID().toString().replace("-", "") +
+                UUID.randomUUID().toString().replace("-", "").substring(0, 16)
             val r = NcmRequest.weapi(
                 path = "/api/w/login/qr/unikey",
                 params = linkedMapOf(
@@ -278,10 +278,11 @@ internal object NcmModules {
                     "unikey" to unikey,
                 ),
             ).getOrThrow()
-            val data = r.body["unikey".let { k -> r.body[k] as? Map<*, *> ?: r.body }
-            val key = (data["unikey"] as? String) ?: (data["data"] as? Map<*, *>)?.get("unikey") as? String
-                ?: NcmJson.parseObject(NcmJson.toJsonString(data)).ncmString("unikey").takeIf { it.isNotBlank() }
-                ?: error("qr key not found in ${r.body.keys}")
+            val body = r.body
+            val data = (body["data"] as? Map<*, *>) ?: body
+            val key = (data["unikey"] as? String)
+                ?: (body["unikey"] as? String)
+                ?: error("qr key not found in ${body.keys}")
             QrKeyResult(key, r.code)
         }
     }
@@ -289,13 +290,12 @@ internal object NcmModules {
     /** 2) 二维码图片（login_qr_create.js）—— key → Base64 PNG 字符串 & 已自动返回 qrimg */
     suspend fun qrLoginImage(key: String): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
-            NcmRequest.weapi(
+            val resp = NcmRequest.weapi(
                 path = "/api/w/login/qr/create",
                 params = linkedMapOf("key" to key, "qrimg" to true),
-            ).map { resp ->
-                val d = resp["data"] as? Map<*, *> ?: resp
-                (d["qrimg"] as? String).orEmpty()
-            }.getOrThrow()
+            ).getOrThrow().body
+            val d = resp["data"] as? Map<*, *> ?: resp
+            (d["qrimg"] as? String).orEmpty()
         }
     }
 
@@ -361,7 +361,7 @@ internal object NcmModules {
                     "clientType" to "pc",
                     "time" to System.currentTimeMillis().toString(),
                 ),
-            ).map { it }.getOrThrow()
+            ).getOrThrow().body
         }
     }
 
@@ -411,7 +411,7 @@ internal object NcmModules {
             NcmRequest.weapi(
                 path = "/api/w/nuser/account/get",
                 params = emptyMap(),
-            ).map { it }.getOrThrow()
+            ).getOrThrow().body
         }
     }
 

@@ -14,6 +14,7 @@ import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.TimeUnit
 import java.util.zip.GZIPInputStream
+import java.util.zip.InflaterInputStream
 import javax.net.ssl.HttpsURLConnection
 
 /**
@@ -92,7 +93,8 @@ object NcmRequest {
             val encrypted = NcmCrypto.weapi(enriched)
 
             // 3. 选择目标 Host（官方 weapi 走 music.163.com，可选自定义 url 参数）
-            val target = url ?: (WY_YX_BASE_URL + path)
+            //    对齐原版 util/request.js：'/api/xxx' → 'https://music.163.com/weapi/xxx'
+            val target = url ?: buildWeapiUrl(path)
 
             // 4. POST
             val body = encrypted.toFormBody().toByteArray(Charsets.UTF_8)
@@ -124,7 +126,9 @@ object NcmRequest {
         runCatching {
             val sess = NcmSession.INSTANCE
             val osEnum = OS.ANDROID
-            val fullUrl = url ?: (WY_INTERFACE_EAPI_BASE_URL + path)
+            // 对齐原版 util/request.js：'/api/xxx' → 'https://interface3.music.163.com/eapi/xxx'
+            // 注意：加密摘要仍使用原始 '/api/xxx' 路径（NcmCrypto.eapi 的第一个参数）
+            val fullUrl = url ?: buildEapiUrl(path)
 
             val encrypted = NcmCrypto.eapi(path, params)
             val body = encrypted.toFormBody().toByteArray(Charsets.UTF_8)
@@ -241,13 +245,23 @@ object NcmRequest {
             else -> null
         }
         Timber.d("NCM $path -> code=$respCode bodyLen=${body.length}")
+        Timber.d("NCM $path -> body=${body.take(1200)}")
         return NcmResponse(respCode, map, msg)
     }
 
     private fun decompressGzipIfNeeded(data: ByteArray): ByteArray {
         if (data.size < 2) return data
+        // gzip (1F 8B)
         if (data[0] == 0x1F.toByte() && data[1] == 0x8B.toByte()) {
             return GZIPInputStream(data.inputStream()).use { it.readBytesCompat() }
+        }
+        // zlib/deflate (0x78 xx)
+        if (data[0] == 0x78.toByte()) {
+            return try {
+                InflaterInputStream(data.inputStream()).use { it.readBytesCompat() }
+            } catch (t: Throwable) {
+                data
+            }
         }
         return data
     }
@@ -262,6 +276,24 @@ object NcmRequest {
             out.write(buf, 0, n)
         }
         return out.toByteArray()
+    }
+
+    // ============================================================
+    // URL 构建（对齐原版 util/request.js 的路径转换）
+    //   weapi: '/api/xxx' → 'https://music.163.com/weapi/xxx'
+    //   eapi : '/api/xxx' → 'https://interface3.music.163.com/eapi/xxx'
+    // ============================================================
+
+    private fun buildWeapiUrl(path: String): String = when {
+        path.startsWith("/api/") -> WY_YX_BASE_URL + "/weapi/" + path.removePrefix("/api/")
+        path.startsWith("/weapi/") || path.startsWith("/eapi/") -> WY_YX_BASE_URL + path
+        else -> WY_YX_BASE_URL + path
+    }
+
+    private fun buildEapiUrl(path: String): String = when {
+        path.startsWith("/api/") -> WY_INTERFACE_EAPI_BASE_URL + "/eapi/" + path.removePrefix("/api/")
+        path.startsWith("/eapi/") -> WY_INTERFACE_EAPI_BASE_URL + path
+        else -> WY_INTERFACE_EAPI_BASE_URL + path
     }
 
     // ============================================================
@@ -284,7 +316,7 @@ object NcmRequest {
         headers["User-Agent"] = osEnum.ua
         if (accept != null) headers["Accept"] = accept
         if (contentType != null) headers["Content-Type"] = contentType
-        headers["Accept-Encoding"] = "gzip, deflate, br"
+        headers["Accept-Encoding"] = "gzip"
         headers["Accept-Language"] = "zh-CN,zh;q=0.9,en;q=0.8"
         if (referer != null) headers["Referer"] = referer
         headers["Connection"] = "keep-alive"
