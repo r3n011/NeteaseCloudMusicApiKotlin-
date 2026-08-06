@@ -293,7 +293,10 @@ object NcmModulesFull {
     // §3 歌手（artist_*）
     // ============================================================================================
 
-    suspend fun artistDetail(id: String) = rawWeapi("/api/artist/v3/detail", mapOf("id" to id))
+    suspend fun artistDetail(id: String) = rawWeapi(
+        "/api/artist/head/info/get",
+        mapOf("id" to id)
+    )
     suspend fun artistDetailDynamic(id: String) = rawWeapi(
         "/api/artist/detail/dynamic",
         mapOf("id" to id)
@@ -303,8 +306,8 @@ object NcmModulesFull {
         mapOf("id" to id, "offset" to offset, "limit" to limit)
     )
     suspend fun artistAlbum(id: String, limit: Int = 30, offset: Int = 0) = rawWeapi(
-        "/api/artist/album/$id",
-        mapOf("offset" to offset, "limit" to limit)
+        "/api/artist/albums/$id",
+        mapOf("offset" to offset, "limit" to limit, "total" to true)
     )
     suspend fun artists(area: Int = -1, type: Int = -1, initial: String = "-1", limit: Int = 30, offset: Int = 0) = rawWeapi(
         "/api/v1/artist/list",
@@ -553,8 +556,10 @@ object NcmModulesFull {
         mapOf("threadId" to threadOf(type, id), "pageNo" to (offset / limit + 1), "pageSize" to limit, "cursor" to if (beforeTime == 0L) 0 else beforeTime)
     )
     suspend fun commentLike(id: String, cid: String, type: CmtType, t: Int = 1) = rawWeapi(
-        "/api/v1/comment/like",
-        mapOf("threadId" to threadOf(type, id), "commentId" to cid, "t" to t, "type" to type.code)
+        // 对齐原版 module/comment_like.js：t=1 → /api/v1/comment/like，t=0 → /api/v1/comment/unlike
+        // data 仅带 threadId + commentId（不带 type/t）
+        if (t == 1) "/api/v1/comment/like" else "/api/v1/comment/unlike",
+        mapOf("threadId" to threadOf(type, id), "commentId" to cid)
     )
     suspend fun commentHugList(id: String, cid: String, type: CmtType) = rawWeapi(
         "/api/comment/hug/list",
@@ -574,7 +579,12 @@ object NcmModulesFull {
         "/api/v1/resource/comments/${threadOf(type, id)}",
         mapOf("rid" to id, "limit" to limit, "offset" to offset, "beforeTime" to beforeTime)
     )
-    /** 发评论 / 回复评论 / 删评论（t=1 发，t=0 删，t=2 回复） */
+    /** 发评论 / 回复评论 / 删评论（t=1 发，t=0 删，t=2 回复）
+     *  对齐原版 module/comment.js：
+     *    add   → POST /api/resource/comments/add     data={threadId, content}
+     *    delete→ POST /api/resource/comments/delete  data={threadId, commentId}
+     *    reply → POST /api/resource/comments/reply   data={threadId, commentId, content}
+     */
     suspend fun commentSend(
         type: CmtType,
         id: String,
@@ -582,32 +592,29 @@ object NcmModulesFull {
         t: Int = 1,
         commentId: String? = null,
     ) = when (t) {
-        // 删除评论（comment_delete.js）：POST /api/v1/comment/delete
+        // 删除评论（comment.js t=0）
         0 -> rawWeapi(
-            "/api/v1/comment/delete",
+            "/api/resource/comments/delete",
             buildMap<String, Any?> {
                 put("threadId", threadOf(type, id))
                 put("commentId", commentId ?: "")
-                put("type", type.code)
             }
         )
-        // 回复评论（comment_reply.js）：POST /api/v1/resource/comments/{threadId}
+        // 回复评论（comment.js t=2）
         2 -> rawWeapi(
-            "/api/v1/resource/comments/${threadOf(type, id)}",
+            "/api/resource/comments/reply",
             buildMap<String, Any?> {
                 put("threadId", threadOf(type, id))
+                put("commentId", commentId ?: "")
                 put("content", content)
-                commentId?.let { put("commentId", it) }
-                put("type", type.code)
             }
         )
-        // 发评论（comment.js）：POST /api/v1/resource/comments/{threadId}
+        // 发评论（comment.js t=1）
         else -> rawWeapi(
-            "/api/v1/resource/comments/${threadOf(type, id)}",
+            "/api/resource/comments/add",
             buildMap<String, Any?> {
                 put("threadId", threadOf(type, id))
                 put("content", content)
-                put("type", type.code)
             }
         )
     }

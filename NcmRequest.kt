@@ -4,6 +4,9 @@ package net.moriafly.ncm
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import android.util.Base64
+import java.security.MessageDigest
+import kotlin.random.Random
 import timber.log.Timber
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
@@ -39,17 +42,145 @@ object NcmRequest {
 
     enum class OS(val ua: String, val appver: String) {
         PC(
-            ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            appver = "3.51.1",
+            // 对齐原版 userAgentMap.weapi.pc（Chrome 124 Edg）
+            ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
+            appver = "3.1.17.204416",
         ),
         ANDROID(
-            ua = "NeteaseMusic/9.1.99.999420(640903650);Dalvik/2.1.0 (Linux; U; Android 14; Pixel 9 Pro XL Build/UQ1A.240205.002)",
-            appver = "9.1.99",
+            // 对齐原版 userAgentMap.api.android（网易云 Android 客户端）
+            ua = "NeteaseMusic/9.1.65.240927161425(9001065);Dalvik/2.1.0 (Linux; U; Android 14; 23013RK75C Build/UKQ1.230804.001)",
+            appver = "8.20.20.231215173437",
         ),
         IOS(
-            ua = "NeteaseMusicIM/1.0.0 (iPhone; iOS 17.5; Scale/3.00)",
-            appver = "11.1.60",
+            ua = "NeteaseMusic 9.0.90/5038 (iPhone; iOS 16.2; zh_CN)",
+            appver = "9.0.90",
         ),
+    }
+
+    // ─── 设备指纹（对齐原版 util/request.js processCookieObject，风控关键） ───
+    // 进程内稳定的 deviceId（一次生成复用，防止每次变化触发风控）
+    private val deviceId: String by lazy { randomHex(32) }
+
+    private fun osMeta(os: OS): Triple<String, String, String> = when (os) {
+        OS.PC -> Triple("Microsoft-Windows-10-Professional-build-19045-64bit", os.appver, "netease")
+        OS.ANDROID -> Triple("14", os.appver, "xiaomi")
+        OS.IOS -> Triple("16.2", os.appver, "distribution")
+    }
+
+    private val HEX = "0123456789abcdef"
+    private val ALPHA = "abcdefghijklmnopqrstuvwxyz"
+
+    private fun randomHex(len: Int): String {
+        val sb = StringBuilder(len)
+        repeat(len) { sb.append(HEX[Random.nextInt(HEX.length)]) }
+        return sb.toString()
+    }
+
+    private fun randomAlpha(len: Int): String {
+        val sb = StringBuilder(len)
+        repeat(len) { sb.append(ALPHA[Random.nextInt(ALPHA.length)]) }
+        return sb.toString()
+    }
+
+    // ─── 匿名 token（对齐原版 generateConfig.js + util/request.js） ─────────
+    // 未登录时通过 /api/register/anonimous 获取 MUSIC_A，模拟游客设备，
+    // 可显著降低 405「操作频繁」风控概率。注册只需进程内一次。
+    @Volatile
+    private var anonymousReady = false
+    @Volatile
+    private var anonymousRegistering = false
+    private val anonymousLock = Any()
+
+    private fun cloudmusicDllEncodeId(id: String): String {
+        // 对齐原版 register_anonimous.js：XOR 循环 + MD5 + Base64
+        val key = "3go8&$8*3*3h0k(2)2"
+        val xored = StringBuilder(id.length)
+        for (i in id.indices) {
+            xored.append((id[i].code xor key[i % key.length].code).toChar())
+        }
+        val digest = MessageDigest.getInstance("MD5")
+            .digest(xored.toString().toByteArray(Charsets.UTF_8))
+        return Base64.encodeToString(digest, Base64.NO_WRAP)
+    }
+
+    /** 惰性获取匿名 token：未登录时注册一次，Set-Cookie 中的 MUSIC_A 自动并入 session */
+    private suspend fun ensureAnonymousToken(sess: NcmSession?) {
+        if (anonymousReady) return
+        if (sess?.isLogin == true) { anonymousReady = true; return }              // 已登录无需匿名
+        if (sess?.cookies?.containsKey("MUSIC_A") == true) { anonymousReady = true; return }
+        synchronized(anonymousLock) {
+            if (anonymousReady || anonymousRegistering) return
+            anonymousRegistering = true
+        }
+        try {
+            val deviceId = randomHex(52).uppercase()
+            val username = Base64.encodeToString(
+                "$deviceId ${cloudmusicDllEncodeId(deviceId)}".toByteArray(Charsets.UTF_8),
+                Base64.NO_WRAP,
+            )
+            val encrypted = NcmCrypto.weapi(mapOf("username" to username))
+            val body = encrypted.toFormBody().toByteArray(Charsets.UTF_8)
+            val target = buildWeapiUrl("/api/register/anonimous")
+            val headers = buildHeaders(
+                host = URL(target).host,
+                referer = WY_YX_BASE_URL + "/",
+                osEnum = OS.PC,
+                session = sess,
+                realIp = sess?.realIp,
+                contentType = "application/x-www-form-urlencoded",
+                accept = "*/*",
+            )
+            val raw = http("POST", target, headers, body, sess?.proxy)
+            if (raw.setCookies.isNotEmpty()) sess?.merge(raw.setCookies)
+            Timber.d("NCM anonymous register -> http=$raw.code setCookies=${raw.setCookies.size}")
+        } catch (t: Throwable) {
+            Timber.w(t, "NCM anonymous register 失败")
+        } finally {
+            anonymousRegistering = false
+            // 无论成败本次进程只尝试一次（失败则下次启动再试）
+            anonymousReady = true
+        }
+    }
+
+    // ─── 随机中国 IP（对齐原版 generateRandomChineseIP，弱化地理风控） ─────
+    private val CHINA_IP_RANGES = listOf(
+        "36.56.", "36.57.", "39.128.", "39.129.", "42.48.", "42.49.",
+        "49.64.", "49.65.", "58.17.", "58.18.", "60.13.", "60.14.",
+        "61.49.", "61.52.", "101.37.", "101.38.", "106.12.", "106.13.",
+        "110.32.", "110.33.", "111.55.", "111.56.", "112.64.", "112.65.",
+        "114.80.", "114.81.", "115.56.", "115.57.", "116.25.", "116.26.",
+        "117.20.", "117.21.", "118.122.", "118.123.", "120.48.", "120.49.",
+        "121.60.", "121.61.", "122.49.", "122.50.", "123.56.", "123.57.",
+        "124.71.", "124.72.", "125.36.", "125.37.", "171.8.", "171.9.",
+        "180.120.", "180.121.", "183.44.", "183.45.", "202.105.", "202.106.",
+        "210.28.", "210.29.", "218.24.", "218.25.", "219.128.", "219.129.",
+        "220.200.", "220.201.", "222.32.", "222.33.", "223.64.", "223.65.",
+    )
+
+    /** 进程内固定的随机中国 IP（一次生成复用，避免频繁变动反触发风控） */
+    private val randomChinaIp: String? by lazy {
+        CHINA_IP_RANGES.randomOrNull()?.let { seg ->
+            "$seg${Random.nextInt(0, 256)}.${Random.nextInt(0, 256)}"
+        }
+    }
+
+    /**
+     * 生成设备指纹 cookie 串（对齐原版 processCookieObject）：
+     * _ntes_nuid / _ntes_nnid / WNMCID / WEVNSM / NMTID / __remember_me / ntes_kaola_ad / osver / deviceId / channel
+     */
+    private fun deviceFingerprintCookies(os: OS, includeNmtid: Boolean): String {
+        val now = System.currentTimeMillis()
+        val nuid = randomHex(32)
+        val nmtid = if (includeNmtid) "NMTID=${randomHex(16)}; " else ""
+        val (osver, appver, channel) = osMeta(os)
+        return buildString {
+            append("__remember_me=true; ntes_kaola_ad=1; ")
+            append("_ntes_nuid=$nuid; _ntes_nnid=$nuid,$now; ")
+            append("WNMCID=${randomAlpha(6)}.$now.01.0; WEVNSM=1.0.0; ")
+            append(nmtid)
+            append("osver=$osver; deviceId=$deviceId; ")
+            append("os=${os.name.lowercase()}; channel=$channel; appver=$appver")
+        }
     }
 
     private const val CONNECT_TIMEOUT_MS = 15_000
@@ -77,6 +208,7 @@ object NcmRequest {
     ): Result<NcmResponse> = withContext(Dispatchers.IO) {
         runCatching {
             val sess = NcmSession.INSTANCE
+            ensureAnonymousToken(sess)
             val osValue = sess?.os?.takeIf { it.isNotBlank() } ?: "pc"
             val osEnum = when (osValue.lowercase()) {
                 "android" -> OS.ANDROID
@@ -125,6 +257,7 @@ object NcmRequest {
     ): Result<NcmResponse> = withContext(Dispatchers.IO) {
         runCatching {
             val sess = NcmSession.INSTANCE
+            ensureAnonymousToken(sess)
             val osEnum = OS.ANDROID
             // 对齐原版 util/request.js：'/api/xxx' → 'https://interface3.music.163.com/eapi/xxx'
             // 注意：加密摘要仍使用原始 '/api/xxx' 路径（NcmCrypto.eapi 的第一个参数）
@@ -156,6 +289,7 @@ object NcmRequest {
     ): Result<NcmResponse> = withContext(Dispatchers.IO) {
         runCatching {
             val sess = NcmSession.INSTANCE
+            ensureAnonymousToken(sess)
             val target = url ?: (WY_LINUXAPI_BASE_URL + path)
             val encrypted = NcmCrypto.linuxapi(params)
             val body = encrypted.toFormBody().toByteArray(Charsets.UTF_8)
@@ -321,10 +455,11 @@ object NcmRequest {
         if (referer != null) headers["Referer"] = referer
         headers["Connection"] = "keep-alive"
 
-        // X-Real-IP / X-Forwarded-For（部分接口对 IP 地理位有要求）
-        if (realIp != null) {
-            headers["X-Real-IP"] = realIp
-            headers["X-Forwarded-For"] = realIp
+        // X-Real-IP / X-Forwarded-For（未设置 realIp 时用进程内固定的随机中国 IP，弱化地理风控）
+        val effRealIp = realIp ?: randomChinaIp
+        if (effRealIp != null) {
+            headers["X-Real-IP"] = effRealIp
+            headers["X-Forwarded-For"] = effRealIp
         }
 
         // Cookie
@@ -336,10 +471,24 @@ object NcmRequest {
             if (cookieSb.isNotEmpty()) cookieSb.append("; ")
             cookieSb.append(extraCookie)
         }
-        // eapi 附加 appver
         if (osEnum == OS.ANDROID) {
+            // eapi：对齐原版 createHeaderCookie(header)——header 字段完整拼入 Cookie
+            val now = System.currentTimeMillis()
+            val (osver, appver, channel) = osMeta(OS.ANDROID)
+            val csrf = session?.cookies?.get("__csrf") ?: ""
+            val headerCookie = buildString {
+                append("osver=$osver; deviceId=$deviceId; os=android; appver=$appver; ")
+                append("versioncode=${appver.replace(".", "")}; mobilename=; ")
+                append("buildver=${now.toString().substring(0, 10)}; resolution=1920x1080; ")
+                append("__csrf=$csrf; channel=$channel; ")
+                append("requestId=${now}_${Random.nextInt(1000).toString().padStart(4, '0')}")
+            }
             if (cookieSb.isNotEmpty()) cookieSb.append("; ")
-            cookieSb.append("appver=${osEnum.appver}; versioncode=${osEnum.appver.replace(".", "")}")
+            cookieSb.append(headerCookie)
+        } else {
+            // weapi：对齐原版 processCookieObject（完整设备指纹 cookie）
+            if (cookieSb.isNotEmpty()) cookieSb.append("; ")
+            cookieSb.append(deviceFingerprintCookies(osEnum, includeNmtid = true))
         }
         if (cookieSb.isNotBlank()) headers["Cookie"] = cookieSb.toString()
 
